@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ボイス+ビデオチャット</title>
+    <title>高機能ボイス＆ビデオチャット</title>
     <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
     <style>
         body { font-family: sans-serif; max-width: 550px; margin: 30px auto; padding: 20px; background: #eceff1; color: #333; }
@@ -150,7 +150,6 @@
                     }
                 });
 
-                // ロビーホスト側で接続が切れたクローンを掃除
                 conn.on('close', () => {
                     activeConnections = activeConnections.filter(c => c !== conn);
                 });
@@ -165,7 +164,6 @@
                 
                 hostConnection.on('data', (data) => {
                     if (data.type === 'ROOM_LIST') {
-                        // もし自分が今入っている部屋がリストから消えていたら（ホストが解散したら）強制退室
                         if (currentRoomId && !isHostOfCurrentRoom) {
                             const roomExists = data.data.some(r => r.id === currentRoomId);
                             if (!roomExists) {
@@ -309,7 +307,6 @@
                     setupCallHandlers(call, remoteUser);
                 });
 
-                // メディア通信の切断を監視
                 voicePeer.on('disconnected', () => {
                     handlePartnerLeft();
                 });
@@ -337,13 +334,11 @@
                 remoteVideoEl = videoEl;
             });
 
-            // 相手が明示的に通話を閉じた場合
             call.on('close', () => {
                 handlePartnerLeft();
             });
         }
 
-        // 相手が抜けた時の処理
         function handlePartnerLeft() {
             alert('相手が退室、または接続が切れました。ロビーに戻ります。');
             leaveRoom();
@@ -421,9 +416,8 @@
             }
         }
 
-        // 退室
+        // 退室処理（ここでお互いの映像残りを完全にクリーンアップします）
         function leaveRoom() {
-            // 自分がホストなら、ロビーに対して部屋を消すように通知
             if (isHostOfCurrentRoom && currentRoomId) {
                 if (hostConnection) {
                     hostConnection.send({ type: 'REMOVE_ROOM', roomId: currentRoomId });
@@ -445,7 +439,23 @@
                 localStream = null;
             }
 
-            // UIリセット
+            // 【ココを強化】相手の映像ソースを空にして非表示にし、プレースホルダーを再表示
+            const rVideo = document.getElementById('remote-video');
+            if (rVideo) {
+                rVideo.srcObject = null;
+                rVideo.load(); // 映像ストリームを強制解放
+                rVideo.style.display = 'none';
+            }
+            
+            const placeholder = document.getElementById('video-placeholder');
+            if (placeholder) placeholder.style.display = 'block';
+
+            // 【ココを強化】UIのテキスト表示系も初期化
+            document.getElementById('remote-video-label').innerText = '相手';
+            document.getElementById('member-list').innerHTML = '';
+            document.getElementById('local-video').srcObject = null;
+
+            // 各種変数のリセット
             remoteVideoEl = null;
             isMuted = false;
             isCameraOn = false;
@@ -454,13 +464,6 @@
             
             document.getElementById('mute-btn').innerText = '🎙️ 自分をマイクON';
             document.getElementById('mute-btn').className = 'active';
-            document.getElementById('local-video').srcObject = null;
-            
-            const rVideo = document.getElementById('remote-video');
-            rVideo.srcObject = null;
-            rVideo.style.display = 'none';
-            document.getElementById('video-placeholder').style.display = 'block';
-            document.getElementById('member-list').innerHTML = '';
             
             document.getElementById('lobby-view').classList.remove('hidden');
             document.getElementById('room-view').classList.add('hidden');
