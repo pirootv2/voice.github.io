@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>高機能ボイスチャット</title>
+    <title>ボイス＆ビデオチャット</title>
     <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
     <style>
         body { font-family: sans-serif; max-width: 550px; margin: 30px auto; padding: 20px; background: #eceff1; color: #333; }
@@ -29,6 +29,12 @@
         .member-info { display: flex; justify-content: space-between; width: 100%; align-items: center; }
         .volume-container { display: flex; align-items: center; gap: 10px; width: 100%; color: #555; font-size: 14px; }
         .volume-slider { width: 100%; margin: 0; }
+
+        /* ビデオプレビュー用スタイル */
+        .video-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 15px; }
+        .video-container { background: #000; border-radius: 8px; overflow: hidden; position: relative; aspect-ratio: 4/3; display: flex; align-items: center; justify-content: center; }
+        video { width: 100%; height: 100%; object-fit: cover; }
+        .video-label { position: absolute; bottom: 5px; left: 5px; background: rgba(0,0,0,0.6); color: white; padding: 2px 6px; font-size: 11px; border-radius: 4px; }
     </style>
 </head>
 <body>
@@ -47,6 +53,7 @@
         
         <h3>🆕 新しい部屋を作る</h3>
         <input type="text" id="room-name-input" placeholder="部屋の名前（例：雑談部屋など）">
+        <input type="password" id="room-password-input" maxlength="5" placeholder="パスワード（数字5桁・任意）">
         <button onclick="createNewRoom()">部屋を作成する</button>
 
         <h3 style="margin-top: 30px;">🚪 開放中の部屋一覧</h3>
@@ -58,16 +65,26 @@
         <h3 id="current-room-title">部屋: 未参加</h3>
         <div class="status" id="connection-status">接続を準備中...</div>
         
+        <div class="video-grid">
+            <div class="video-container">
+                <video id="local-video" autoplay playsinline muted></video>
+                <div class="video-label">あなた</div>
+            </div>
+            <div class="video-container" id="remote-video-wrapper">
+                <div id="video-placeholder" style="color: #666; font-size: 13px;">相手の映像なし</div>
+                <video id="remote-video" autoplay playsinline style="display: none;"></video>
+                <div class="video-label" id="remote-video-label">相手</div>
+            </div>
+        </div>
+
         <h4 style="margin-top: 20px; margin-bottom: 10px;">👥 参加中のメンバー一覧 (音量調整)</h4>
-        <ul id="member-list">
-            </ul>
+        <ul id="member-list"></ul>
         
         <div class="flex-group" style="margin-top: 25px;">
             <button id="mute-btn" onclick="toggleMute()" class="active">🎙️ 自分をマイクON</button>
+            <button id="camera-btn" onclick="toggleCamera()" class="danger">📁 自分をカメラOFF</button>
             <button onclick="leaveRoom()" class="danger">🚪 退室</button>
         </div>
-
-        <div id="audio-container"></div>
     </div>
 
     <script>
@@ -82,11 +99,12 @@
         let localStream = null;
         let currentCall = null;
         let isMuted = false;
-        let isHostOfCurrentRoom = false; // 自分が今の部屋の作成者かどうか
+        let isCameraOn = false; // 初期状態はカメラOFF
+        let isHostOfCurrentRoom = false; 
         let currentRoomId = "";
 
-        // 音声要素(Audioタグ)を管理するオブジェクト（音量変更用）
-        let remoteAudios = {};
+        // 相手のMedia（Video/Audio共通）要素への参照
+        let remoteVideoEl = null;
 
         // 1. 名前入力の保存
         function saveUsername() {
@@ -163,9 +181,10 @@
 
             roomList.forEach(room => {
                 const li = document.createElement('li');
+                const isLocked = room.hasPassword ? '🔒 ' : '';
                 li.innerHTML = `
-                    <span>🔊 <b>${room.name}</b> <small style="color:#888;">(作った人: ${room.creatorName})</small></span>
-                    <button onclick="startVoiceChat('${room.id}', '${room.name}', false, '${room.creatorName}')">参加する</button>
+                    <span>🔊 <b>${isLocked}${room.name}</b> <small style="color:#888;">(作った人: ${room.creatorName})</small></span>
+                    <button onclick="checkPasswordAndJoin('${room.id}', '${room.name}', '${room.creatorName}')">参加する</button>
                 `;
                 listEl.appendChild(li);
             });
@@ -173,11 +192,25 @@
 
         function createNewRoom() {
             const input = document.getElementById('room-name-input');
+            const passInput = document.getElementById('room-password-input');
             const name = input.value.trim();
+            const password = passInput.value.trim();
+
             if (!name) return alert('部屋名を入力してください');
+            
+            // 数字5桁のバリデーション（入力されている場合のみ）
+            if (password && !/^\d{5}$/.test(password)) {
+                return alert('パスワードは数字5桁で入力してください（かけない場合は空欄）');
+            }
 
             const roomId = 'room-' + Date.now();
-            const newRoom = { name: name, id: roomId, creatorName: myUsername };
+            const newRoom = { 
+                name: name, 
+                id: roomId, 
+                creatorName: myUsername,
+                hasPassword: password !== "",
+                password: password // 簡易実装のため平文保存
+            };
 
             isHostOfCurrentRoom = true; 
             currentRoomId = roomId;
@@ -189,7 +222,22 @@
             }
 
             input.value = '';
+            passInput.value = '';
             startVoiceChat(roomId, name, true, myUsername);
+        }
+
+        function checkPasswordAndJoin(roomId, roomName, creatorName) {
+            const targetRoom = roomList.find(r => r.id === roomId);
+            if (!targetRoom) return;
+
+            if (targetRoom.hasPassword) {
+                const userPass = prompt('この部屋にはパスワードが必要です。\n数字5桁を入力してください:');
+                if (userPass === null) return; // キャンセル
+                if (userPass !== targetRoom.password) {
+                    return alert('パスワードが一致しません。');
+                }
+            }
+            startVoiceChat(roomId, roomName, false, creatorName);
         }
 
         function addRoomToList(roomObj) {
@@ -211,20 +259,29 @@
         }
 
 
-        // 3. ボイスチャット & 参加者個別ボリューム処理
+        // 3. ボイス＆ビデオチャット & 参加者個別ボリューム処理
         async function startVoiceChat(roomId, displayTitle, isCreator, creatorName) {
             currentRoomId = roomId;
             document.getElementById('lobby-view').classList.add('hidden');
             document.getElementById('room-view').classList.remove('hidden');
             document.getElementById('current-room-title').innerText = `部屋: ${displayTitle}`;
-            document.getElementById('connection-status').innerText = 'マイクを取得中...';
+            document.getElementById('connection-status').innerText = 'メディア（マイク/カメラ）を取得中...';
 
             // 初期リストとして自分を表示
             updateMemberList(creatorName);
 
             try {
-                localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+                // 音声とビデオ両方を取得
+                localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
                 
+                // 自分の映像を画面にセット
+                document.getElementById('local-video').srcObject = localStream;
+                
+                // 初期状態ではカメラはOFFにする（トラックを無効化）
+                localStream.getVideoTracks().forEach(track => track.enabled = false);
+                isCameraOn = false;
+                updateCameraBtnStyle();
+
                 const myVoiceId = isCreator ? roomId : `${roomId}-client`;
                 const targetVoiceId = isCreator ? `${roomId}-client` : roomId;
 
@@ -248,7 +305,7 @@
 
             } catch (err) {
                 console.error(err);
-                alert('マイクの開始に失敗しました。');
+                alert('マイクまたはカメラの開始に失敗しました。デバイスの許可を確認してください。');
                 leaveRoom();
             }
         }
@@ -258,19 +315,21 @@
             
             // 参加者一覧に相手を追加
             updateMemberList(remoteUserName);
+            document.getElementById('remote-video-label').innerText = remoteUserName;
 
             call.on('stream', (remoteStream) => {
                 document.getElementById('connection-status').innerText = '🟢 通話中';
                 
-                const audio = document.createElement('audio');
-                audio.srcObject = remoteStream;
-                audio.autoplay = true;
+                // 相手用のビデオタグにストリームをセット
+                const videoEl = document.getElementById('remote-video');
+                videoEl.srcObject = remoteStream;
+                videoEl.style.display = 'block';
+                document.getElementById('video-placeholder').style.display = 'none';
                 
-                // あとから音量を変えられるようにオブジェクトに保存
-                remoteAudios[remoteUserName] = audio;
+                remoteVideoEl = videoEl;
 
-                const container = document.getElementById('audio-container');
-                container.appendChild(audio);
+                // 相手が退出した時などの管理用に退避
+                window.remoteStreamRef = remoteStream;
             });
 
             call.on('close', () => {
@@ -298,7 +357,7 @@
                     <div class="member-info"><span>👤 <b>${partnerName}</b></span></div>
                     <div class="volume-container">
                         <span>🔈</span>
-                        <input type="range" class="volume-slider" min="0" max="1" step="0.1" value="1" oninput="changeVolume('${partnerName}', this.value)">
+                        <input type="range" class="volume-slider" min="0" max="1" step="0.1" value="1" oninput="changeVolume(this.value)">
                         <span>🔊</span>
                     </div>
                 `;
@@ -307,12 +366,13 @@
         }
 
         // 個別音量を変更する関数
-        function changeVolume(userName, value) {
-            if (remoteAudios[userName]) {
-                remoteAudios[userName].volume = value;
+        function changeVolume(value) {
+            if (remoteVideoEl) {
+                remoteVideoEl.volume = value;
             }
         }
 
+        // マイクのON/OFF切り替え
         function toggleMute() {
             if (!localStream) return;
             const audioTrack = localStream.getAudioTracks()[0];
@@ -329,9 +389,35 @@
             }
         }
 
+        // カメラのON/OFF切り替え
+        function toggleCamera() {
+            if (!localStream) return;
+            const videoTrack = localStream.getVideoTracks()[0];
+            if (!videoTrack) return alert('カメラデバイスが見つかりません');
+
+            if (isCameraOn) {
+                videoTrack.enabled = false;
+                isCameraOn = false;
+            } else {
+                videoTrack.enabled = true;
+                isCameraOn = true;
+            }
+            updateCameraBtnStyle();
+        }
+
+        function updateCameraBtnStyle() {
+            const btn = document.getElementById('camera-btn');
+            if (isCameraOn) {
+                btn.innerText = '🎥 自分をカメラON';
+                btn.className = 'active';
+            } else {
+                btn.innerText = '📁 自分をカメラOFF';
+                btn.className = 'danger';
+            }
+        }
+
         // 退室
         function leaveRoom() {
-            // 自分が作った部屋だった場合、他の人に部屋消滅を知らせる
             if (isHostOfCurrentRoom) {
                 if (hostConnection) {
                     hostConnection.send({ type: 'REMOVE_ROOM', roomId: currentRoomId });
@@ -346,20 +432,26 @@
                 localStream.getTracks().forEach(track => track.stop());
             }
 
-            // 初期化
-            remoteAudios = {};
+            // 初期化とUIリセット
+            remoteVideoEl = null;
             isMuted = false;
+            isCameraOn = false;
             isHostOfCurrentRoom = false;
+            
             document.getElementById('mute-btn').innerText = '🎙️ 自分をマイクON';
             document.getElementById('mute-btn').className = 'active';
-            document.getElementById('audio-container').innerHTML = '';
+            document.getElementById('local-video').srcObject = null;
+            
+            const rVideo = document.getElementById('remote-video');
+            rVideo.srcObject = null;
+            rVideo.style.display = 'none';
+            document.getElementById('video-placeholder').style.display = 'block';
             document.getElementById('member-list').innerHTML = '';
             
             document.getElementById('lobby-view').classList.remove('hidden');
             document.getElementById('room-view').classList.add('hidden');
         }
 
-        // ブラウザをバツボタンで閉じたときも、自分がホストなら部屋を消す
         window.onbeforeunload = () => {
             if (isHostOfCurrentRoom) {
                 if (hostConnection) {
