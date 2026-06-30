@@ -3,12 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>部屋一覧自動同期ボイスチャット</title>
+    <title>高機能ボイスチャット</title>
     <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
     <style>
-        body { font-family: sans-serif; max-width: 500px; margin: 30px auto; padding: 20px; background: #eceff1; color: #333; }
+        body { font-family: sans-serif; max-width: 550px; margin: 30px auto; padding: 20px; background: #eceff1; color: #333; }
         .card { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px; }
-        input, button { padding: 12px; font-size: 16px; border-radius: 6px; border: 1px solid #ccc; box-sizing: border-box; }
+        input, button, select { padding: 12px; font-size: 16px; border-radius: 6px; border: 1px solid #ccc; box-sizing: border-box; }
         input { width: 100%; margin-bottom: 15px; }
         button { width: 100%; background: #007aff; color: white; border: none; cursor: pointer; font-weight: bold; }
         button:hover { background: #0056b3; }
@@ -23,29 +23,47 @@
         .flex-group { display: flex; gap: 10px; }
         .flex-group button { width: auto; flex-grow: 1; }
         .empty-message { color: #999; text-align: center; padding: 20px; font-style: italic; }
+        
+        /* 参加者リスト用スタイル */
+        .member-item { flex-direction: column; align-items: flex-start; gap: 8px; }
+        .member-info { display: flex; justify-content: space-between; width: 100%; align-items: center; }
+        .volume-container { display: flex; align-items: center; gap: 10px; width: 100%; color: #555; font-size: 14px; }
+        .volume-slider { width: 100%; margin: 0; }
     </style>
 </head>
 <body>
 
-    <h2>📢 ルーム一覧付きボイチャ</h2>
+    <h2>📢 ルーム一覧＆個別音量付きボイチャ</h2>
 
-    <div id="lobby-view" class="card">
+    <div id="login-view" class="card">
+        <h3>👤 あなたの名前を入力してください</h3>
+        <input type="text" id="username-input" placeholder="ニックネーム（例: たろう）">
+        <button onclick="saveUsername()">次へ進む</button>
+    </div>
+
+    <div id="lobby-view" class="card hidden">
+        <p>ようこそ、<b id="my-name-display"></b> さん！</p>
+        <hr style="border: 0; border-top: 1px solid #eee; margin: 15px 0;">
+        
         <h3>🆕 新しい部屋を作る</h3>
-        <input type="text" id="room-name-input" placeholder="部屋の名前（例：雑談部屋、ゲーム用など）">
+        <input type="text" id="room-name-input" placeholder="部屋の名前（例：雑談部屋など）">
         <button onclick="createNewRoom()">部屋を作成する</button>
 
         <h3 style="margin-top: 30px;">🚪 開放中の部屋一覧</h3>
-        <ul id="room-list">
-            </ul>
-        <div id="no-rooms" class="empty-message">現在、部屋はありません。上のフォームから作ってみましょう！</div>
+        <ul id="room-list"></ul>
+        <div id="no-rooms" class="empty-message">現在、部屋はありません。部屋を作ってみましょう！</div>
     </div>
 
     <div id="room-view" class="card hidden">
         <h3 id="current-room-title">部屋: 未参加</h3>
         <div class="status" id="connection-status">接続を準備中...</div>
         
+        <h4 style="margin-top: 20px; margin-bottom: 10px;">👥 参加中のメンバー一覧 (音量調整)</h4>
+        <ul id="member-list">
+            </ul>
+        
         <div class="flex-group" style="margin-top: 25px;">
-            <button id="mute-btn" onclick="toggleMute()" class="active">🎙️ マイクON</button>
+            <button id="mute-btn" onclick="toggleMute()" class="active">🎙️ 自分をマイクON</button>
             <button onclick="leaveRoom()" class="danger">🚪 退室</button>
         </div>
 
@@ -53,23 +71,37 @@
     </div>
 
     <script>
-        // 固定のロビー識別用ID
-        const LOBBY_ID = "GLOBAL_VOICE_CHAT_LOBBY_2026";
+        const LOBBY_ID = "GLOBAL_VOICE_CHAT_LOBBY_2026_V2";
         
-        let lobbyPeer = null;      // ロビー同期用のPeer
-        let activeConnections = []; // ロビーに接続している他のユーザーのリスト
-        let roomList = [];         // 現在存在する部屋のリスト
+        let myUsername = "";
+        let lobbyPeer = null;
+        let activeConnections = []; 
+        let roomList = [];         
         
-        let voicePeer = null;      // 通話用のPeer
+        let voicePeer = null;      
         let localStream = null;
         let currentCall = null;
         let isMuted = false;
+        let isHostOfCurrentRoom = false; // 自分が今の部屋の作成者かどうか
+        let currentRoomId = "";
 
-        window.onload = () => {
+        // 音声要素(Audioタグ)を管理するオブジェクト（音量変更用）
+        let remoteAudios = {};
+
+        // 1. 名前入力の保存
+        function saveUsername() {
+            const input = document.getElementById('username-input');
+            myUsername = input.value.trim();
+            if (!myUsername) return alert('名前を入力してください');
+
+            document.getElementById('login-view').classList.add('hidden');
+            document.getElementById('lobby-view').classList.remove('hidden');
+            document.getElementById('my-name-display').innerText = myUsername;
+
             initLobby();
-        };
+        }
 
-        // --- 1. ロビー（部屋一覧の同期）システム ---
+        // 2. ロビー（部屋一覧同期）処理
         function initLobby() {
             lobbyPeer = new Peer(LOBBY_ID);
 
@@ -86,7 +118,6 @@
             });
         }
 
-        // 自分が【親】のときの処理
         function setupHostHandlers() {
             lobbyPeer.on('connection', (conn) => {
                 activeConnections.push(conn);
@@ -97,12 +128,13 @@
                 conn.on('data', (data) => {
                     if (data.type === 'CREATE_ROOM') {
                         addRoomToList(data.roomObj);
+                    } else if (data.type === 'REMOVE_ROOM') {
+                        removeRoomFromList(data.roomId);
                     }
                 });
             });
         }
 
-        // 自分が【子】のときの処理
         let hostConnection = null;
         function connectToHost() {
             lobbyPeer = new Peer();
@@ -118,7 +150,6 @@
             });
         }
 
-        // 部屋リストを画面に描画する
         function renderRoomList() {
             const listEl = document.getElementById('room-list');
             const emptyEl = document.getElementById('no-rooms');
@@ -132,23 +163,24 @@
 
             roomList.forEach(room => {
                 const li = document.createElement('li');
-                // ※ エラー修正：joinRoomではなく、定義されているstartVoiceChatを直接呼ぶように修正
                 li.innerHTML = `
-                    <span>🔊 <b>${room.name}</b></span>
-                    <button onclick="startVoiceChat('${room.id}', '${room.name}', false)">参加する</button>
+                    <span>🔊 <b>${room.name}</b> <small style="color:#888;">(作った人: ${room.creatorName})</small></span>
+                    <button onclick="startVoiceChat('${room.id}', '${room.name}', false, '${room.creatorName}')">参加する</button>
                 `;
                 listEl.appendChild(li);
             });
         }
 
-        // 新しい部屋を作成ボタンを押したとき
         function createNewRoom() {
             const input = document.getElementById('room-name-input');
             const name = input.value.trim();
             if (!name) return alert('部屋名を入力してください');
 
             const roomId = 'room-' + Date.now();
-            const newRoom = { name: name, id: roomId };
+            const newRoom = { name: name, id: roomId, creatorName: myUsername };
+
+            isHostOfCurrentRoom = true; 
+            currentRoomId = roomId;
 
             if (hostConnection) {
                 hostConnection.send({ type: 'CREATE_ROOM', roomObj: newRoom });
@@ -157,25 +189,38 @@
             }
 
             input.value = '';
-            // 作成者（1人目）として部屋に入る
-            startVoiceChat(roomId, name, true);
+            startVoiceChat(roomId, name, true, myUsername);
         }
 
         function addRoomToList(roomObj) {
             roomList.push(roomObj);
             renderRoomList();
+            broadcastToAll({ type: 'ROOM_LIST', data: roomList });
+        }
+
+        function removeRoomFromList(roomId) {
+            roomList = roomList.filter(r => r.id !== roomId);
+            renderRoomList();
+            broadcastToAll({ type: 'ROOM_LIST', data: roomList });
+        }
+
+        function broadcastToAll(msg) {
             activeConnections.forEach(conn => {
-                if (conn.open) conn.send({ type: 'ROOM_LIST', data: roomList });
+                if (conn.open) conn.send(msg);
             });
         }
 
 
-        // --- 2. ボイスチャットシステム ---
-        async function startVoiceChat(roomId, displayTitle, isCreator) {
+        // 3. ボイスチャット & 参加者個別ボリューム処理
+        async function startVoiceChat(roomId, displayTitle, isCreator, creatorName) {
+            currentRoomId = roomId;
             document.getElementById('lobby-view').classList.add('hidden');
             document.getElementById('room-view').classList.remove('hidden');
             document.getElementById('current-room-title').innerText = `部屋: ${displayTitle}`;
             document.getElementById('connection-status').innerText = 'マイクを取得中...';
+
+            // 初期リストとして自分を表示
+            updateMemberList(creatorName);
 
             try {
                 localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
@@ -190,14 +235,15 @@
                         document.getElementById('connection-status').innerText = 'ユーザーの参加を待っています...';
                     } else {
                         document.getElementById('connection-status').innerText = '接続中...';
-                        const call = voicePeer.call(targetVoiceId, localStream);
-                        setupCallHandlers(call);
+                        const call = voicePeer.call(targetVoiceId, localStream, { metadata: { username: myUsername } });
+                        setupCallHandlers(call, creatorName);
                     }
                 });
 
                 voicePeer.on('call', (call) => {
                     call.answer(localStream);
-                    setupCallHandlers(call);
+                    const remoteUser = call.metadata ? call.metadata.username : "ゲスト参加者";
+                    setupCallHandlers(call, remoteUser);
                 });
 
             } catch (err) {
@@ -207,8 +253,12 @@
             }
         }
 
-        function setupCallHandlers(call) {
+        function setupCallHandlers(call, remoteUserName) {
             currentCall = call;
+            
+            // 参加者一覧に相手を追加
+            updateMemberList(remoteUserName);
+
             call.on('stream', (remoteStream) => {
                 document.getElementById('connection-status').innerText = '🟢 通話中';
                 
@@ -216,8 +266,10 @@
                 audio.srcObject = remoteStream;
                 audio.autoplay = true;
                 
+                // あとから音量を変えられるようにオブジェクトに保存
+                remoteAudios[remoteUserName] = audio;
+
                 const container = document.getElementById('audio-container');
-                container.innerHTML = '';
                 container.appendChild(audio);
             });
 
@@ -227,13 +279,46 @@
             });
         }
 
-        // ミュート機能
+        // 参加者一覧と音量スライダーを描画
+        function updateMemberList(partnerName) {
+            const listEl = document.getElementById('member-list');
+            listEl.innerHTML = "";
+
+            // 1. 自分を表示
+            const liMe = document.createElement('li');
+            liMe.className = "member-item";
+            liMe.innerHTML = `<div class="member-info"><span>👤 <b>${myUsername}</b> (あなた)</span></div>`;
+            listEl.appendChild(liMe);
+
+            // 2. 相手がいれば表示（音量調整バー付き）
+            if (partnerName && partnerName !== myUsername) {
+                const liOther = document.createElement('li');
+                liOther.className = "member-item";
+                liOther.innerHTML = `
+                    <div class="member-info"><span>👤 <b>${partnerName}</b></span></div>
+                    <div class="volume-container">
+                        <span>🔈</span>
+                        <input type="range" class="volume-slider" min="0" max="1" step="0.1" value="1" oninput="changeVolume('${partnerName}', this.value)">
+                        <span>🔊</span>
+                    </div>
+                `;
+                listEl.appendChild(liOther);
+            }
+        }
+
+        // 個別音量を変更する関数
+        function changeVolume(userName, value) {
+            if (remoteAudios[userName]) {
+                remoteAudios[userName].volume = value;
+            }
+        }
+
         function toggleMute() {
             if (!localStream) return;
             const audioTrack = localStream.getAudioTracks()[0];
             if (isMuted) {
                 audioTrack.enabled = true;
-                document.getElementById('mute-btn').innerText = '🎙️ マイクON';
+                document.getElementById('mute-btn').innerText = '🎙️ 自分をマイクON';
                 document.getElementById('mute-btn').className = 'active';
                 isMuted = false;
             } else {
@@ -246,19 +331,44 @@
 
         // 退室
         function leaveRoom() {
+            // 自分が作った部屋だった場合、他の人に部屋消滅を知らせる
+            if (isHostOfCurrentRoom) {
+                if (hostConnection) {
+                    hostConnection.send({ type: 'REMOVE_ROOM', roomId: currentRoomId });
+                } else {
+                    removeRoomFromList(currentRoomId);
+                }
+            }
+
             if (currentCall) currentCall.close();
             if (voicePeer) voicePeer.destroy();
             if (localStream) {
                 localStream.getTracks().forEach(track => track.stop());
             }
 
+            // 初期化
+            remoteAudios = {};
             isMuted = false;
-            document.getElementById('mute-btn').innerText = '🎙️ マイクON';
+            isHostOfCurrentRoom = false;
+            document.getElementById('mute-btn').innerText = '🎙️ 自分をマイクON';
             document.getElementById('mute-btn').className = 'active';
+            document.getElementById('audio-container').innerHTML = '';
+            document.getElementById('member-list').innerHTML = '';
             
             document.getElementById('lobby-view').classList.remove('hidden');
             document.getElementById('room-view').classList.add('hidden');
         }
+
+        // ブラウザをバツボタンで閉じたときも、自分がホストなら部屋を消す
+        window.onbeforeunload = () => {
+            if (isHostOfCurrentRoom) {
+                if (hostConnection) {
+                    hostConnection.send({ type: 'REMOVE_ROOM', roomId: currentRoomId });
+                } else {
+                    removeRoomFromList(currentRoomId);
+                }
+            }
+        };
     </script>
 </body>
 </html>
