@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ボイス＆ビデオチャット</title>
+    <title>ボイス+ビデオチャット</title>
     <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
     <style>
         body { font-family: sans-serif; max-width: 550px; margin: 30px auto; padding: 20px; background: #eceff1; color: #333; }
@@ -99,11 +99,10 @@
         let localStream = null;
         let currentCall = null;
         let isMuted = false;
-        let isCameraOn = false; // 初期状態はカメラOFF
+        let isCameraOn = false; 
         let isHostOfCurrentRoom = false; 
         let currentRoomId = "";
 
-        // 相手のMedia（Video/Audio共通）要素への参照
         let remoteVideoEl = null;
 
         // 1. 名前入力の保存
@@ -150,6 +149,11 @@
                         removeRoomFromList(data.roomId);
                     }
                 });
+
+                // ロビーホスト側で接続が切れたクローンを掃除
+                conn.on('close', () => {
+                    activeConnections = activeConnections.filter(c => c !== conn);
+                });
             });
         }
 
@@ -161,6 +165,14 @@
                 
                 hostConnection.on('data', (data) => {
                     if (data.type === 'ROOM_LIST') {
+                        // もし自分が今入っている部屋がリストから消えていたら（ホストが解散したら）強制退室
+                        if (currentRoomId && !isHostOfCurrentRoom) {
+                            const roomExists = data.data.some(r => r.id === currentRoomId);
+                            if (!roomExists) {
+                                alert('部屋が解散されました。');
+                                leaveRoom();
+                            }
+                        }
                         roomList = data.data;
                         renderRoomList();
                     }
@@ -198,7 +210,6 @@
 
             if (!name) return alert('部屋名を入力してください');
             
-            // 数字5桁のバリデーション（入力されている場合のみ）
             if (password && !/^\d{5}$/.test(password)) {
                 return alert('パスワードは数字5桁で入力してください（かけない場合は空欄）');
             }
@@ -209,7 +220,7 @@
                 id: roomId, 
                 creatorName: myUsername,
                 hasPassword: password !== "",
-                password: password // 簡易実装のため平文保存
+                password: password
             };
 
             isHostOfCurrentRoom = true; 
@@ -232,7 +243,7 @@
 
             if (targetRoom.hasPassword) {
                 const userPass = prompt('この部屋にはパスワードが必要です。\n数字5桁を入力してください:');
-                if (userPass === null) return; // キャンセル
+                if (userPass === null) return; 
                 if (userPass !== targetRoom.password) {
                     return alert('パスワードが一致しません。');
                 }
@@ -259,7 +270,7 @@
         }
 
 
-        // 3. ボイス＆ビデオチャット & 参加者個別ボリューム処理
+        // 3. ボイス＆ビデオチャット処理
         async function startVoiceChat(roomId, displayTitle, isCreator, creatorName) {
             currentRoomId = roomId;
             document.getElementById('lobby-view').classList.add('hidden');
@@ -267,17 +278,12 @@
             document.getElementById('current-room-title').innerText = `部屋: ${displayTitle}`;
             document.getElementById('connection-status').innerText = 'メディア（マイク/カメラ）を取得中...';
 
-            // 初期リストとして自分を表示
             updateMemberList(creatorName);
 
             try {
-                // 音声とビデオ両方を取得
                 localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
-                
-                // 自分の映像を画面にセット
                 document.getElementById('local-video').srcObject = localStream;
                 
-                // 初期状態ではカメラはOFFにする（トラックを無効化）
                 localStream.getVideoTracks().forEach(track => track.enabled = false);
                 isCameraOn = false;
                 updateCameraBtnStyle();
@@ -303,53 +309,55 @@
                     setupCallHandlers(call, remoteUser);
                 });
 
+                // メディア通信の切断を監視
+                voicePeer.on('disconnected', () => {
+                    handlePartnerLeft();
+                });
+
             } catch (err) {
                 console.error(err);
-                alert('マイクまたはカメラの開始に失敗しました。デバイスの許可を確認してください。');
+                alert('マイクまたはカメラの開始に失敗しました。');
                 leaveRoom();
             }
         }
 
         function setupCallHandlers(call, remoteUserName) {
             currentCall = call;
-            
-            // 参加者一覧に相手を追加
             updateMemberList(remoteUserName);
             document.getElementById('remote-video-label').innerText = remoteUserName;
 
             call.on('stream', (remoteStream) => {
                 document.getElementById('connection-status').innerText = '🟢 通話中';
                 
-                // 相手用のビデオタグにストリームをセット
                 const videoEl = document.getElementById('remote-video');
                 videoEl.srcObject = remoteStream;
                 videoEl.style.display = 'block';
                 document.getElementById('video-placeholder').style.display = 'none';
                 
                 remoteVideoEl = videoEl;
-
-                // 相手が退出した時などの管理用に退避
-                window.remoteStreamRef = remoteStream;
             });
 
+            // 相手が明示的に通話を閉じた場合
             call.on('close', () => {
-                alert('相手が退室しました。');
-                leaveRoom();
+                handlePartnerLeft();
             });
         }
 
-        // 参加者一覧と音量スライダーを描画
+        // 相手が抜けた時の処理
+        function handlePartnerLeft() {
+            alert('相手が退室、または接続が切れました。ロビーに戻ります。');
+            leaveRoom();
+        }
+
         function updateMemberList(partnerName) {
             const listEl = document.getElementById('member-list');
             listEl.innerHTML = "";
 
-            // 1. 自分を表示
             const liMe = document.createElement('li');
             liMe.className = "member-item";
             liMe.innerHTML = `<div class="member-info"><span>👤 <b>${myUsername}</b> (あなた)</span></div>`;
             listEl.appendChild(liMe);
 
-            // 2. 相手がいれば表示（音量調整バー付き）
             if (partnerName && partnerName !== myUsername) {
                 const liOther = document.createElement('li');
                 liOther.className = "member-item";
@@ -365,14 +373,12 @@
             }
         }
 
-        // 個別音量を変更する関数
         function changeVolume(value) {
             if (remoteVideoEl) {
                 remoteVideoEl.volume = value;
             }
         }
 
-        // マイクのON/OFF切り替え
         function toggleMute() {
             if (!localStream) return;
             const audioTrack = localStream.getAudioTracks()[0];
@@ -389,7 +395,6 @@
             }
         }
 
-        // カメラのON/OFF切り替え
         function toggleCamera() {
             if (!localStream) return;
             const videoTrack = localStream.getVideoTracks()[0];
@@ -418,7 +423,8 @@
 
         // 退室
         function leaveRoom() {
-            if (isHostOfCurrentRoom) {
+            // 自分がホストなら、ロビーに対して部屋を消すように通知
+            if (isHostOfCurrentRoom && currentRoomId) {
                 if (hostConnection) {
                     hostConnection.send({ type: 'REMOVE_ROOM', roomId: currentRoomId });
                 } else {
@@ -426,17 +432,25 @@
                 }
             }
 
-            if (currentCall) currentCall.close();
-            if (voicePeer) voicePeer.destroy();
+            if (currentCall) {
+                currentCall.close();
+                currentCall = null;
+            }
+            if (voicePeer) {
+                voicePeer.destroy();
+                voicePeer = null;
+            }
             if (localStream) {
                 localStream.getTracks().forEach(track => track.stop());
+                localStream = null;
             }
 
-            // 初期化とUIリセット
+            // UIリセット
             remoteVideoEl = null;
             isMuted = false;
             isCameraOn = false;
             isHostOfCurrentRoom = false;
+            currentRoomId = "";
             
             document.getElementById('mute-btn').innerText = '🎙️ 自分をマイクON';
             document.getElementById('mute-btn').className = 'active';
@@ -453,13 +467,7 @@
         }
 
         window.onbeforeunload = () => {
-            if (isHostOfCurrentRoom) {
-                if (hostConnection) {
-                    hostConnection.send({ type: 'REMOVE_ROOM', roomId: currentRoomId });
-                } else {
-                    removeRoomFromList(currentRoomId);
-                }
-            }
+            leaveRoom();
         };
     </script>
 </body>
